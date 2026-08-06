@@ -40,7 +40,8 @@ Bilicraft Handheld Stocks（股市面板）是为 **Bilicraft Handheld** 制作�
 │   ├── StockCommandGateway.kt
 │   ├── StockMarketPlugin.kt
 │   ├── StockMarketRepository.kt
-│   └── StockModels.kt
+│   ├── StockModels.kt
+│   └── PurchaseRecordStore.kt
 ├── build.gradle.kts         # Android Library 与 .bhplugin 打包任务
 ├── settings.gradle.kts
 └── gradle.properties
