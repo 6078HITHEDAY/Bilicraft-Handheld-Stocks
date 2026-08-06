@@ -35,8 +35,9 @@ class StockCommandGateway(
 
     suspend fun refreshMoney(): StockCommandResult = commandMutex.withLock {
         if (!isConnected()) return StockCommandResult.NotConnected()
-        val response = executeAndCollect("/money", 4_000) { text -> text.contains("资金:") || text.contains("资金：") }
-            ?: return StockCommandResult.Timeout("/money")
+        val response = executeAndCollect("/bal", 4_000) { text ->
+            MONEY_REGEX.containsMatchIn(text) || text.contains("余额:") || text.contains("余额：")
+        } ?: return StockCommandResult.Timeout("/bal")
         val amount = MONEY_REGEX.find(response)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
             ?: return StockCommandResult.Failure("服务器已响应，但未能解析资金数额")
         _money.value = amount
@@ -57,10 +58,13 @@ class StockCommandGateway(
         val command = "/invest portfolio"
         val lines = executeWindow(command, timeoutMs = 5_500, settleMs = 900)
         val holdings = parsePortfolio(lines)
-        if (holdings.isNotEmpty()) Result.success(holdings)
-        else {
-            val reason = lines.lastOrNull { looksLikeFailure(it) } ?: "服务器已响应，但未解析到持股记录"
-            Result.failure(IllegalStateException(reason))
+        val failure = lines.lastOrNull { looksLikeFailure(it) }
+        when {
+            lines.any(::looksLikeEmptyPortfolio) -> Result.success(emptyList())
+            failure != null -> Result.failure(IllegalStateException(failure))
+            holdings.isEmpty() && lines.isNotEmpty() -> Result.success(emptyList())
+            lines.isNotEmpty() -> Result.success(holdings)
+            else -> Result.failure(IllegalStateException("查询超时或服务器未返回持股信息"))
         }
     }
 
@@ -70,8 +74,13 @@ class StockCommandGateway(
         val lines = executeWindow(command, timeoutMs = 5_500, settleMs = 900)
         if (lines.isEmpty()) return StockCommandResult.Timeout(command)
         val failure = lines.firstOrNull(::looksLikeFailure)
-        if (failure != null) StockCommandResult.Failure(failure)
-        else StockCommandResult.Success(lines.lastOrNull { it.isNotBlank() } ?: "服务器已处理交易指令")
+        if (failure != null) return StockCommandResult.Failure(failure)
+        val success = lines.lastOrNull { looksLikeTradeSuccess(it, action) }
+        if (success != null) {
+            StockCommandResult.Success(success)
+        } else {
+            StockCommandResult.Failure(lines.lastOrNull { it.isNotBlank() } ?: "服务器未返回交易结果")
+        }
     }
 
     private suspend fun executeAndCollect(command: String, timeoutMs: Long, predicate: (String) -> Boolean): String? {
@@ -173,6 +182,7 @@ class StockCommandGateway(
         val normalized = lines.map(::normalizeChatText).map(String::trim).filter(String::isNotBlank)
         val holdings = mutableListOf<StockHolding>()
         var companyName: String? = null
+        var marketId: Int? = null
         var shares: Long? = null
         var totalValue: Double? = null
 
@@ -181,9 +191,10 @@ class StockCommandGateway(
             val stockCount = shares
             val value = totalValue
             if (name != null && stockCount != null && value != null) {
-                holdings += StockHolding(name, stockCount, value)
+                holdings += StockHolding(name, stockCount, value, marketId)
             }
             companyName = null
+            marketId = null
             shares = null
             totalValue = null
         }
@@ -199,7 +210,9 @@ class StockCommandGateway(
                 }
                 isPortfolioCompanyName(line) -> {
                     flush()
-                    companyName = line
+                    val match = PORTFOLIO_COMPANY_REGEX.matchEntire(line)
+                    marketId = match?.groupValues?.getOrNull(1)?.toIntOrNull()
+                    companyName = match?.groupValues?.getOrNull(2)?.trim()?.takeIf(String::isNotBlank) ?: line
                 }
             }
         }
@@ -228,6 +241,18 @@ class StockCommandGateway(
 
     private fun looksLikeFailure(text: String): Boolean = FAILURE_WORDS.any(text::contains)
 
+    private fun looksLikeTradeSuccess(text: String, action: String): Boolean {
+        val compact = normalizeCompact(text)
+        val actionWords = if (action == "buy") BUY_ACTION_WORDS else SELL_ACTION_WORDS
+        return actionWords.any(compact::contains) && TRADE_SUCCESS_WORDS.any(compact::contains)
+    }
+
+    private fun looksLikeEmptyPortfolio(text: String): Boolean {
+        val compact = normalizeCompact(text)
+        return EMPTY_PORTFOLIO_MARKERS.any(compact::contains) ||
+            Regex("(?:总持仓|持股|股票|股票数量|持有数量|持仓数量)[:：]?0股?").containsMatchIn(compact)
+    }
+
     private data class MessageWaiter(
         val predicate: (String) -> Boolean,
         val deferred: CompletableDeferred<String>? = null,
@@ -236,16 +261,27 @@ class StockCommandGateway(
     )
 
     companion object {
-        private val MONEY_REGEX = Regex("资金[:：]\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)")
+        private val MONEY_REGEX = Regex("(?:资金|余额)[:：]?\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)")
         private val ID_REGEX = Regex("Id[:：]\\s*(\\d+)", RegexOption.IGNORE_CASE)
         private val PRICE_REGEX = Regex("价格[:：]\\s*([0-9]+(?:\\.[0-9]+)?)")
         private val STATUS_REGEX = Regex("状态[:：]\\s*([^\\n]+)")
         private val AVAILABLE_REGEX = Regex("可用股数[:：]\\s*(\\d+)")
         private val SHARES_REGEX = Regex("股票[:：]\\s*(\\d+)")
         private val TOTAL_VALUE_REGEX = Regex("总价值[:：]\\s*([0-9]+(?:\\.[0-9]+)?)")
+        private val PORTFOLIO_COMPANY_REGEX = Regex("(?:#|Id[:：]?\\s*)?(\\d+)\\s*[·.、:：-]?\\s*(.+)", RegexOption.IGNORE_CASE)
         private val FORMAT_CODE_REGEX = Regex("§.")
         private const val COMMAND_GAP_MS = 300L
         private const val POLL_MS = 100L
         private val FAILURE_WORDS = listOf("失败", "错误", "不足", "无法", "不存在", "无效", "禁止", "没有", "超出")
+        private val BUY_ACTION_WORDS = listOf("买入", "购买")
+        private val SELL_ACTION_WORDS = listOf("卖出", "出售", "售出")
+        private val TRADE_SUCCESS_WORDS = listOf("成功", "已买入", "已购买", "已卖出", "已出售", "已售出")
+        private val EMPTY_PORTFOLIO_MARKERS = listOf(
+            "没有持股",
+            "暂无持股",
+            "未持有股票",
+            "当前没有股票",
+            "没有任何股票"
+        )
     }
 }

@@ -34,5 +34,7 @@ class StockMarketRepository(
     companion object {
         const val DEFAULT_BASE_URL = "https://www.pleasance.icu"
         val SUPPORTED_INTERVALS = listOf("15m", "1h", "4h", "24h")
+
+        fun intervalLabel(interval: String): String = if (interval == "15m") "单次采集" else interval
     }
 }

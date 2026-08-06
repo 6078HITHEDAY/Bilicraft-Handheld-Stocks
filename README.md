@@ -2,12 +2,13 @@
 
 Bilicraft Handheld Stocks（股市面板）是为 **Bilicraft Handheld** 制作的外部 Compose 插件。它把帕拉伦股市行情、K 线分析、玩家资金与持股查询以及股票交易整合在同一个移动端面板中。
 
-当前版本：`0.1.9`
+当前版本：`0.2.0`
 
 ## 功能
 
 - 获取公司列表、市场健康状态和多周期 K 线数据。
-- 支持 `15m`、`1h`、`4h`、`24h` K 线周期。
+- 支持“单次采集”（接口周期 `15m`）、`1h`、`4h`、`24h` K 线周期。
+- 初次选择股票时，单次采集默认显示最近 24 小时，其他周期按对应的 7 天、30 天、90 天范围自适应显示。
 - 蜡烛图可切换收盘价折线显示。
 - 折线、K 线和售出/回购点的显示设置会在切换股票及退出应用后保留。
 - K 线支持横向拖动、双指缩放和单击十字线。
@@ -21,12 +22,13 @@ Bilicraft Handheld Stocks（股市面板）是为 **Bilicraft Handheld** 制作�
 - 支持主动查询资金、持股和当前公司的实时价格。
 - 买入或卖出成功后自动刷新资金与持股。
 - 股票列表同步显示对应公司的持股数量。
+- 按当前登录账号 UUID 在插件本地分别保存本插件买入记录，计算购买均价、单股和整体持有收益及涨跌幅。
 
 ## 数据与隐私
 
 - 市场数据默认来自 `https://www.pleasance.icu`。
 - 资金、持股和交易通过 Bilicraft Handheld 插件宿主发送 Minecraft 聊天命令完成。
-- 插件不会持久缓存玩家资金或持股；每次进入股票页面时会重新查询。
+- 插件不会持久缓存玩家资金或服务器持股；每次进入股票页面时会重新查询。购买均价记录仅保存本插件发起的买入，并按当前账号 UUID 隔离。
 - 插件不保存公司 ID 映射表，ID 与公司关系以网页接口数据为准。
 
 ## 项目结构
@@ -66,7 +68,7 @@ gradle --no-daemon clean packageBhPlugin
 生成文件位于：
 
 ```text
-build/outputs/bhplugin/stock-market-0.1.9.bhplugin
+build/outputs/bhplugin/stock-market-0.2.0.bhplugin
 ```
 
 `.bhplugin` 是 ZIP 格式的插件包，包含：
@@ -87,7 +89,7 @@ classes.dex
 
 插件当前依赖服务器提供以下聊天命令及其中文响应格式：
 
-- `/money`
+- `/bal`
 - `/invest portfolio`
 - `/invest company info <id>`
 - `/invest buy <id> <数量>`
@@ -110,9 +112,9 @@ classes.dex
 
 ```bash
 gradle --no-daemon clean packageBhPlugin
-unzip -t build/outputs/bhplugin/stock-market-0.1.9.bhplugin
-unzip -p build/outputs/bhplugin/stock-market-0.1.9.bhplugin plugin.json
-sha256sum build/outputs/bhplugin/stock-market-0.1.9.bhplugin
+unzip -t build/outputs/bhplugin/stock-market-0.2.0.bhplugin
+unzip -p build/outputs/bhplugin/stock-market-0.2.0.bhplugin plugin.json
+sha256sum build/outputs/bhplugin/stock-market-0.2.0.bhplugin
 ```
 
 ## 许可

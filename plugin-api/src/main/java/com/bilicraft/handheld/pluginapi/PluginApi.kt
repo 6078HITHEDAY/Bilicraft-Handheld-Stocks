@@ -51,6 +51,8 @@ interface BhPluginPanel {
 interface BhPluginHost {
     val appContext: Context
     val pluginDataDir: File
+    /** 当前登录的游戏账号；宿主未提供或未登录时为 null。 */
+    val currentPlayer: BhPlayer?
     val connectionState: StateFlow<BhConnectionState>
     val chatEvents: Flow<BhChatEvent>
 
@@ -58,6 +60,11 @@ interface BhPluginHost {
     fun log(message: String)
     suspend fun httpGet(url: String): String
 }
+
+data class BhPlayer(
+    val name: String,
+    val uuid: String
+)
 
 data class BhChatEvent(
     val plainText: String,

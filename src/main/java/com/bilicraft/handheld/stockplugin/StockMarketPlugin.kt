@@ -27,6 +27,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Info
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
@@ -93,7 +94,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.1.9",
+        version = "0.2.0",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -116,7 +117,8 @@ object StockMarketPlugin : BhPlugin {
     }
 
     override fun onLoad(host: BhPluginHost) {
-        host.log("股市插件已加载")
+        val player = host.currentPlayer
+        host.log("股市插件已加载：玩家名=${player?.name}, UUID=${player?.uuid}")
     }
 
     override fun onUnload(host: BhPluginHost) {
@@ -130,6 +132,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     val scope = rememberCoroutineScope()
     val repository = remember(host) { StockMarketRepository(host) }
     val gateway = remember(host) { StockCommandGateway(host) }
+    val purchaseStore = remember(host) { PurchaseRecordStore(host) }
+    val currentPlayer = remember(host) { host.currentPlayer }
     var state by remember { mutableStateOf(StockUiState(loading = true)) }
     var action by remember { mutableStateOf("buy") }
     var amount by remember { mutableStateOf("") }
@@ -137,6 +141,15 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     var chartDisplaySettings by remember(host) {
         mutableStateOf(loadChartDisplaySettings(host.pluginDataDir))
     }
+    val initialPlayerState = remember(currentPlayer) {
+        StockUiState(
+            loading = true,
+            playerUuid = currentPlayer?.uuid,
+            playerName = currentPlayer?.name
+        )
+    }
+    var playerStateInitialized by remember { mutableStateOf(false) }
+    var confirmClearRecords by remember { mutableStateOf(false) }
     val pageScrollState = rememberScrollState()
 
     fun updateChartDisplaySettings(settings: ChartDisplaySettings) {
@@ -157,6 +170,25 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
         state = state.copy(dialogMessage = message)
     }
 
+    suspend fun refreshPortfolio(showEmptyMessage: Boolean = false) {
+        state = state.copy(portfolioLoading = true, holdings = emptyList())
+        gateway.queryPortfolio()
+            .onSuccess { holdings ->
+                val activeHoldings = holdings.filter { it.shares > 0 }
+                state = state.copy(
+                    portfolioLoading = false,
+                    holdings = activeHoldings,
+                    dialogMessage = if (showEmptyMessage && activeHoldings.isEmpty()) "当前没有持股。" else state.dialogMessage
+                )
+            }
+            .onFailure { error ->
+                state = state.copy(
+                    portfolioLoading = false,
+                    dialogMessage = if (showEmptyMessage) "持股查询失败：${error.message}" else state.dialogMessage
+                )
+            }
+    }
+
     fun reloadKline() {
         scope.launch {
             val companyId = state.selectedCompanyId ?: return@launch
@@ -168,6 +200,7 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                         availableShares = data.availableShares,
                         lastError = null
                     )
+                    chartViewport = defaultChartViewport(data.kline, state.selectedInterval)
                 }
                 .onFailure { error -> state = state.copy(loading = false, lastError = error.message ?: "K线加载失败") }
         }
@@ -196,8 +229,10 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     kline = chartData.kline,
                     availableShares = chartData.availableShares,
                     health = health,
+                    purchaseRecords = currentPlayer?.uuid?.let(purchaseStore::load).orEmpty(),
                     liveInfo = state.liveInfo?.takeIf { it.name == companies.firstOrNull { company -> company.id == selectedId }?.name }
                 )
+                chartViewport = defaultChartViewport(chartData.kline, state.selectedInterval)
             }.onFailure { error ->
                 state = state.copy(loading = false, lastError = error.message ?: "加载失败")
             }
@@ -209,18 +244,17 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     }
 
     LaunchedEffect(Unit) {
-        refreshAll()
-        if (gateway.isConnected()) {
-            gateway.refreshMoney()
-            state = state.copy(portfolioLoading = true)
-            gateway.queryPortfolio()
-                .onSuccess { holdings -> state = state.copy(portfolioLoading = false, holdings = holdings) }
-                .onFailure { state = state.copy(portfolioLoading = false) }
+        if (!playerStateInitialized) {
+            state = initialPlayerState
+            playerStateInitialized = true
         }
-    }
-
-    LaunchedEffect(state.selectedCompanyId, state.selectedInterval) {
-        chartViewport = ChartViewport()
+        refreshAll()
+        if (currentPlayer == null) {
+            state = state.copy(dialogMessage = "未获取到当前登录账号，请登录后重新打开股市面板。")
+        } else if (gateway.isConnected()) {
+            gateway.refreshMoney()
+            refreshPortfolio()
+        }
     }
 
     BackHandler(onBack = onClose)
@@ -301,6 +335,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 balance = state.walletBalance,
                 liveInfo = state.liveInfo,
                 holdings = state.holdings,
+                companies = state.companies,
+                purchaseRecords = state.purchaseRecords,
                 portfolioLoading = state.portfolioLoading,
                 serverId = selectedCompany()?.marketId,
                 onActionChange = { action = it },
@@ -308,20 +344,15 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                 onMoney = { scope.launch { showResult(gateway.refreshMoney()) } },
                 onPortfolio = {
                     scope.launch {
-                        state = state.copy(portfolioLoading = true)
-                        gateway.queryPortfolio()
-                            .onSuccess { holdings ->
-                                state = state.copy(
-                                    portfolioLoading = false,
-                                    holdings = holdings,
-                                    dialogMessage = if (holdings.isEmpty()) "当前没有持股。" else null
-                                )
-                            }
-                            .onFailure { error ->
-                                state = state.copy(portfolioLoading = false, dialogMessage = "持股查询失败：${error.message}")
-                            }
+                        refreshPortfolio(showEmptyMessage = true)
                     }
                 },
+                onPortfolioInfo = {
+                    state = state.copy(
+                        dialogMessage = "购买均价、持有收益均需要在本插件上购买时记录，其他途径购买无法统计记录"
+                    )
+                },
+                onClearRecords = { confirmClearRecords = true },
                 onQueryPrice = {
                     val serverId = selectedCompany()?.marketId
                     if (serverId == null) {
@@ -347,8 +378,52 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                                     state = state.copy(liveInfo = info)
                                     val tradeResult = gateway.trade(action, serverId, amountValue)
                                     if (tradeResult is StockCommandResult.Success) {
+                                        val playerUuid = currentPlayer?.uuid
+                                        val company = selectedCompany()
+                                        val price = info.price
+                                        if (playerUuid != null && company != null) {
+                                            if (action == "buy") {
+                                                purchaseStore.recordBuy(playerUuid, serverId, company.name, amountValue, price)
+                                            } else {
+                                                val tracked = state.purchaseRecords[serverId]
+                                                purchaseStore.recordSell(
+                                                    playerUuid,
+                                                    serverId,
+                                                    amountValue,
+                                                    fullySold = tracked != null && amountValue >= (state.holdings.firstOrNull { holding ->
+                                                        holding.marketId == serverId || holding.companyName == company.name
+                                                    }?.shares ?: tracked.shares)
+                                                )
+                                            }
+                                            state = state.copy(purchaseRecords = purchaseStore.load(playerUuid))
+                                        }
                                         gateway.refreshMoney()
-                                        gateway.queryPortfolio()
+                                        if (action == "sell") {
+                                            state = state.copy(holdings = state.holdings.mapNotNull { holding ->
+                                                val matches = holding.marketId == serverId || holding.companyName == company?.name
+                                                if (!matches) holding else {
+                                                    val remaining = (holding.shares - amountValue).coerceAtLeast(0L)
+                                                    holding.copy(
+                                                        shares = remaining,
+                                                        totalValue = if (holding.shares > 0) holding.totalValue * remaining / holding.shares else 0.0
+                                                    ).takeIf { remaining > 0 }
+                                                }
+                                            })
+                                        }
+                                        gateway.queryPortfolio().onSuccess { holdings ->
+                                            if (action == "sell" && currentPlayer?.uuid != null) {
+                                                val remaining = holdings.firstOrNull { holding ->
+                                                    holding.marketId == serverId || holding.companyName == company?.name
+                                                }?.shares ?: 0L
+                                                if (remaining == 0L) {
+                                                    purchaseStore.recordSell(currentPlayer.uuid, serverId, amountValue, fullySold = true)
+                                                }
+                                            }
+                                            state = state.copy(
+                                                holdings = holdings.filter { it.shares > 0 },
+                                                purchaseRecords = currentPlayer?.uuid?.let(purchaseStore::load).orEmpty()
+                                            )
+                                        }
                                     }
                                     showResult(tradeResult)
                                 }
@@ -373,6 +448,22 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
             title = { Text("股市操作提示") },
             text = { Text(message) },
             confirmButton = { TextButton(onClick = { state = state.copy(dialogMessage = null) }) { Text("确定") } }
+        )
+    }
+
+    if (confirmClearRecords) {
+        AlertDialog(
+            onDismissRequest = { confirmClearRecords = false },
+            title = { Text("清除本地记录") },
+            text = { Text("确定要清除本机所有账号的本地买入记录吗？此操作无法撤销，且不会影响服务器持仓。") },
+            dismissButton = { TextButton(onClick = { confirmClearRecords = false }) { Text("取消") } },
+            confirmButton = {
+                TextButton(onClick = {
+                    purchaseStore.clearAll()
+                    state = state.copy(purchaseRecords = emptyMap())
+                    confirmClearRecords = false
+                }) { Text("清除") }
+            }
         )
     }
 }
@@ -457,6 +548,11 @@ private fun StockPickerList(
                                     Text("持有 ${holding.shares} 股", color = colors.tertiary, style = MaterialTheme.typography.labelSmall)
                                 }
                             }
+                            Text(
+                                "剩余 ${company.availableShares?.toString() ?: "--"} 股",
+                                color = colors.onSurfaceVariant,
+                                style = MaterialTheme.typography.labelSmall
+                            )
                         }
                         Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                             Text(company.latestPrice?.let { "%.2f".format(it) } ?: "--", fontWeight = FontWeight.Bold)
@@ -510,8 +606,9 @@ private fun StockSummary(company: StockCompany?) {
 private fun IntervalPicker(selected: String, onSelect: (String) -> Unit) {
     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         StockMarketRepository.SUPPORTED_INTERVALS.forEach { interval ->
-            if (interval == selected) Button(onClick = { onSelect(interval) }) { Text(interval) }
-            else OutlinedButton(onClick = { onSelect(interval) }) { Text(interval) }
+            val label = StockMarketRepository.intervalLabel(interval)
+            if (interval == selected) Button(onClick = { onSelect(interval) }) { Text(label) }
+            else OutlinedButton(onClick = { onSelect(interval) }) { Text(label) }
         }
     }
 }
@@ -1036,12 +1133,16 @@ private fun TradePanel(
     balance: Double?,
     liveInfo: LiveStockInfo?,
     holdings: List<StockHolding>,
+    companies: List<StockCompany>,
+    purchaseRecords: Map<Int, PurchaseRecord>,
     portfolioLoading: Boolean,
     serverId: Int?,
     onActionChange: (String) -> Unit,
     onAmountChange: (String) -> Unit,
     onMoney: () -> Unit,
     onPortfolio: () -> Unit,
+    onPortfolioInfo: () -> Unit,
+    onClearRecords: () -> Unit,
     onQueryPrice: () -> Unit,
     onSend: () -> Unit
 ) {
@@ -1088,20 +1189,124 @@ private fun TradePanel(
             }
             Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 OutlinedButton(onClick = onPortfolio, enabled = !portfolioLoading) { Text(if (portfolioLoading) "查询中" else "持股") }
+                OutlinedButton(onClick = onClearRecords) { Text("清除本地记录") }
             }
-            if (holdings.isNotEmpty()) {
-                val totalShares = holdings.sumOf { it.shares }
-                val totalHoldingValue = holdings.sumOf { it.totalValue }
-                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                    Text("持股汇总", style = MaterialTheme.typography.titleSmall)
-                    Text("总计：$totalShares 股 · ${"%.2f".format(totalHoldingValue)} 帕元")
-                    holdings.forEach { holding ->
-                        Text("${holding.companyName}: ${holding.shares} 股 · ${"%.2f".format(holding.totalValue)}")
+            PortfolioSummary(
+                holdings = holdings,
+                companies = companies,
+                purchaseRecords = purchaseRecords,
+                onInfo = onPortfolioInfo
+            )
+        }
+    }
+}
+
+@Composable
+private fun PortfolioSummary(
+    holdings: List<StockHolding>,
+    companies: List<StockCompany>,
+    purchaseRecords: Map<Int, PurchaseRecord>,
+    onInfo: () -> Unit
+) {
+    val colors = MaterialTheme.colorScheme
+    val companyByName = remember(companies) { companies.associateBy { it.name } }
+    val rows = holdings.map { holding ->
+        val company = companyByName[holding.companyName]
+        val record = (holding.marketId ?: company?.marketId)?.let(purchaseRecords::get)
+            ?: purchaseRecords.values.firstOrNull { it.companyName == holding.companyName }
+        val pnl = record?.let { holding.totalValue - it.averagePrice * holding.shares }
+        val pnlPct = record?.let { if (it.averagePrice > 0.0) pnl!! / (it.averagePrice * holding.shares) * 100.0 else null }
+        Triple(holding, pnl, pnlPct)
+    }
+    val recordByName = remember(purchaseRecords) { purchaseRecords.values.associateBy { it.companyName } }
+    val totalValue = rows.sumOf { it.first.totalValue }
+    val trackedRows = holdings.mapNotNull { holding ->
+        val company = companyByName[holding.companyName]
+        val record = (holding.marketId ?: company?.marketId)?.let(purchaseRecords::get)
+            ?: recordByName[holding.companyName]
+            ?: return@mapNotNull null
+        holding to record
+    }
+    val trackedValue = trackedRows.sumOf { it.first.totalValue }
+    val trackedCost = trackedRows.sumOf { it.first.shares * it.second.averagePrice }
+    val totalPnl = if (trackedCost > 0.0) trackedValue - trackedCost else null
+    val totalPnlPct = totalPnl?.let { it / trackedCost * 100.0 }
+
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+            Text("持股汇总", style = MaterialTheme.typography.titleSmall, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f))
+            TextButton(onClick = onInfo) {
+                Icon(Icons.Default.Info, contentDescription = "购买均价统计说明")
+            }
+        }
+        Text(
+            "总持仓 ${holdings.sumOf { it.shares }} 股 · ${formatMoney(totalValue)}",
+            color = colors.onSurfaceVariant
+        )
+        Text(
+            "总体收益 ${formatPnl(totalPnl)} (${formatPercent(totalPnlPct)})",
+            color = pnlColor(totalPnl)
+        )
+        rows.forEach { (holding, pnl, pnlPct) ->
+            Card(
+                colors = CardDefaults.cardColors(containerColor = colors.surfaceVariant),
+                shape = RoundedCornerShape(5.dp),
+                border = androidx.compose.foundation.BorderStroke(1.dp, colors.outlineVariant)
+            ) {
+                Column(Modifier.fillMaxWidth().padding(10.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text(holding.companyName, fontWeight = FontWeight.Bold, modifier = Modifier.weight(1f), maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text("${holding.shares} 股", color = colors.onSurfaceVariant)
                     }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
+                        Text("市值 ${formatMoney(holding.totalValue)}", color = colors.onSurfaceVariant)
+                    }
+                    Text("持有收益 ${formatPnl(pnl)} (${formatPercent(pnlPct)})", color = pnlColor(pnl))
+                    val company = companyByName[holding.companyName]
+                    val record = (holding.marketId ?: company?.marketId)?.let(purchaseRecords::get)
+                        ?: recordByName[holding.companyName]
+                    Text(
+                        if (record == null) "购买均价 --（未在本插件记录）" else "购买均价 ${formatMoney(record.averagePrice)} · 记录成本 ${formatMoney(record.totalCost)}",
+                        color = colors.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelSmall
+                    )
                 }
             }
         }
     }
+}
+
+private fun formatMoney(value: Double?): String = value?.let { "%.2f 帕元".format(it) } ?: "--"
+private fun formatPnl(value: Double?): String = value?.let { "%+.2f 帕元".format(it) } ?: "未记录"
+private fun formatPercent(value: Double?): String = value?.let { "%+.2f%%".format(it) } ?: "未记录"
+private fun pnlColor(value: Double?): Color = when {
+    value == null -> Color.Unspecified
+    value >= 0.0 -> STOCK_UP
+    else -> STOCK_DOWN
+}
+
+private fun defaultChartViewport(points: List<StockKlinePoint>, interval: String): ChartViewport {
+    val size = points.size
+    if (size <= 2) return ChartViewport()
+    val targetMillis = when (interval) {
+        "15m" -> 24L * 60 * 60 * 1000
+        "1h" -> 7L * 24 * 60 * 60 * 1000
+        "4h" -> 30L * 24 * 60 * 60 * 1000
+        else -> 90L * 24 * 60 * 60 * 1000
+    }
+    val latest = points.lastOrNull()?.time
+    val firstVisibleIndex = if (latest == null) -1 else points.indexOfFirst { point ->
+        point.time?.let { it >= latest - targetMillis } == true
+    }
+    val fallbackVisible = when (interval) {
+        "15m" -> 96
+        "1h" -> 168
+        "4h" -> 180
+        else -> 90
+    }
+    val visible = (if (firstVisibleIndex >= 0) size - firstVisibleIndex else fallbackVisible).coerceIn(2, size)
+    val zoom = (size.toFloat() / visible).coerceAtLeast(1f)
+    return ChartViewport(zoom = zoom, pan = (size - visible) / 2f)
 }
 
 private val STOCK_UP = Color(0xFF3FB950)
@@ -1124,33 +1329,37 @@ private fun StockMarketTheme(content: @Composable () -> Unit) {
 }
 
 private val STOCK_DARK_COLORS: ColorScheme = darkColorScheme(
-    primary = Color(0xFF58A6FF),
-    onPrimary = Color(0xFF001D36),
-    secondaryContainer = Color(0xFF13233A),
-    onSecondaryContainer = Color(0xFFD8E8FF),
-    tertiary = Color(0xFFFFC857),
-    background = Color(0xFF0D1117),
-    onBackground = Color(0xFFF0F0F0),
-    surface = Color(0xFF151515),
-    onSurface = Color(0xFFF0F0F0),
-    surfaceVariant = Color(0xFF222222),
-    onSurfaceVariant = Color(0xFFB8B8B8),
-    outline = Color(0xFF5C6370),
-    outlineVariant = Color(0xFF30343A)
+    primary = Color(0xFF49BCE8),
+    onPrimary = Color(0xFF071017),
+    secondary = Color(0xFF31D69B),
+    onSecondary = Color(0xFF071017),
+    secondaryContainer = Color(0xFF182C3B),
+    onSecondaryContainer = Color(0xFFD8F1FF),
+    tertiary = Color(0xFFE8B85B),
+    background = Color(0xFF090D12),
+    onBackground = Color(0xFFEEF3F8),
+    surface = Color(0xFF111821),
+    onSurface = Color(0xFFEEF3F8),
+    surfaceVariant = Color(0xFF151E29),
+    onSurfaceVariant = Color(0xFF8390A3),
+    outline = Color(0xFF344358),
+    outlineVariant = Color(0xFF263143)
 )
 
 private val STOCK_LIGHT_COLORS: ColorScheme = lightColorScheme(
-    primary = Color(0xFF0969DA),
+    primary = Color(0xFF0783B5),
     onPrimary = Color.White,
-    secondaryContainer = Color(0xFFDDF4FF),
-    onSecondaryContainer = Color(0xFF04395E),
+    secondary = Color(0xFF168A67),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFD9F3EA),
+    onSecondaryContainer = Color(0xFF0D4B3A),
     tertiary = Color(0xFF9A6700),
-    background = Color(0xFFF6F8FA),
-    onBackground = Color(0xFF1F2328),
+    background = Color(0xFFF3F6F8),
+    onBackground = Color(0xFF17202A),
     surface = Color.White,
-    onSurface = Color(0xFF1F2328),
-    surfaceVariant = Color(0xFFEAEEF2),
-    onSurfaceVariant = Color(0xFF59636E),
-    outline = Color(0xFF8C959F),
-    outlineVariant = Color(0xFFD0D7DE)
+    onSurface = Color(0xFF17202A),
+    surfaceVariant = Color(0xFFE8EEF2),
+    onSurfaceVariant = Color(0xFF617083),
+    outline = Color(0xFF8798A8),
+    outlineVariant = Color(0xFFC8D3DD)
 )

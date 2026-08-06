@@ -11,7 +11,8 @@ data class StockCompany(
     @SerialName("risk_level") val riskLevel: Int? = null,
     val status: String? = null,
     @SerialName("latest_price") val latestPrice: Double? = null,
-    @SerialName("change_pct") val changePct: Double? = null
+    @SerialName("change_pct") val changePct: Double? = null,
+    @SerialName("available_shares") val availableShares: Long? = null
 )
 
 @Serializable
@@ -63,7 +64,8 @@ data class StockHealthResponse(
 data class StockHolding(
     val companyName: String,
     val shares: Long,
-    val totalValue: Double
+    val totalValue: Double,
+    val marketId: Int? = null
 )
 
 data class LiveStockInfo(
@@ -85,6 +87,9 @@ data class StockUiState(
     val walletBalance: Double? = null,
     val liveInfo: LiveStockInfo? = null,
     val holdings: List<StockHolding> = emptyList(),
+    val purchaseRecords: Map<Int, PurchaseRecord> = emptyMap(),
+    val playerUuid: String? = null,
+    val playerName: String? = null,
     val portfolioLoading: Boolean = false,
     val dialogMessage: String? = null,
     val lastError: String? = null
