@@ -41,7 +41,7 @@ class StockCommandGateway(
         val amount = MONEY_REGEX.find(response)?.groupValues?.getOrNull(1)?.replace(",", "")?.toDoubleOrNull()
             ?: return StockCommandResult.Failure("服务器已响应，但未能解析资金数额")
         _money.value = amount
-        StockCommandResult.Success("当前资金：$amount 帕元")
+        StockCommandResult.Success("当前资金：$amount 元")
     }
 
     suspend fun queryCompanyInfo(serverId: Int): Result<LiveStockInfo> = commandMutex.withLock {

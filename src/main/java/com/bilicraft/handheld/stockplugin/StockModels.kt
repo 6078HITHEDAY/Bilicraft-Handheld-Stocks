@@ -88,12 +88,20 @@ data class StockUiState(
     val liveInfo: LiveStockInfo? = null,
     val holdings: List<StockHolding> = emptyList(),
     val purchaseRecords: Map<Int, PurchaseRecord> = emptyMap(),
+    val profitHistory: List<ProfitHistoryRecord> = emptyList(),
     val playerUuid: String? = null,
     val playerName: String? = null,
     val portfolioLoading: Boolean = false,
     val dialogMessage: String? = null,
     val lastError: String? = null
 )
+
+enum class StockMainTab(val label: String) {
+    Market("行情"),
+    Watchlist("自选"),
+    Portfolio("持仓"),
+    Analysis("分析")
+}
 
 sealed interface StockCommandResult {
     data class Success(val message: String) : StockCommandResult

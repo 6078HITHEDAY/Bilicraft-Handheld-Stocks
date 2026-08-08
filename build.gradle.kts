@@ -10,7 +10,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21"
 }
 
-version = "0.2.0"
+version = "0.2.1"
 
 group = "com.bilicraft.handheld.stockplugin"
 
@@ -36,6 +36,7 @@ android {
 
 dependencies {
     compileOnly(project(":plugin-api"))
+    runtimeOnly("org.jetbrains:annotations:23.0.0")
 
     val composeBom = platform("androidx.compose:compose-bom:2024.09.03")
     compileOnly(composeBom)
