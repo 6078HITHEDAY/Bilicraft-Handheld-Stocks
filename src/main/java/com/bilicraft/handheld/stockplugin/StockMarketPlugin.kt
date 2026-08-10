@@ -104,7 +104,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.2.1",
+        version = "0.2.2",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -203,7 +203,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
         return profitStore.recordSnapshot(
             playerUuid = playerUuid,
             unrealizedPnl = unrealizedPnl,
-            currentTrackedCost = metrics.trackedCost
+            currentTrackedCost = metrics.trackedCost,
+            totalAssets = gateway.money.value?.plus(metrics.marketValue)
         )
     }
 
@@ -887,7 +888,7 @@ private fun portfolioMetrics(state: StockUiState): PortfolioMetrics {
     val marketValue = rows.sumOf { it.holding.totalValue }
     val trackedRows = rows.filter { it.cost != null }
     val trackedCost = trackedRows.sumOf { it.cost ?: 0.0 }
-    val trackedValue = trackedRows.sumOf { it.holding.totalValue }
+    val trackedValue = trackedRows.sumOf { row -> (row.cost ?: 0.0) + (row.pnl ?: 0.0) }
     val pnl = if (trackedCost > 0.0) trackedValue - trackedCost else null
     return PortfolioMetrics(marketValue, trackedCost, pnl, pnl?.let { it / trackedCost * 100.0 }, rows)
 }
@@ -966,19 +967,28 @@ private fun AssetLabel(label: String, value: String, alignment: Alignment.Horizo
 private data class DailyProfitPoint(
     val day: String,
     val epochMillis: Long,
-    val profit: Double,
-    val profitPct: Double?,
-    val investedCapital: Double
+    val cumulativeProfit: Double,
+    val cumulativeProfitPct: Double?,
+    val dailyProfit: Double,
+    val dailyProfitPct: Double?,
+    val investedCapital: Double,
+    val totalAssets: Double?
 )
 
 private fun buildDailyProfitSeries(state: StockUiState): List<DailyProfitPoint> {
+    var previousCumulativeProfit = 0.0
     return state.profitHistory.sortedBy(ProfitHistoryRecord::timestamp).map { record ->
+        val dailyProfit = record.totalPnl - previousCumulativeProfit
+        previousCumulativeProfit = record.totalPnl
         DailyProfitPoint(
             day = record.day,
             epochMillis = record.timestamp,
-            profit = record.totalPnl,
-            profitPct = record.totalPnlPct,
-            investedCapital = record.investedCapital
+            cumulativeProfit = record.totalPnl,
+            cumulativeProfitPct = record.totalPnlPct,
+            dailyProfit = dailyProfit,
+            dailyProfitPct = (dailyProfit / (record.totalAssets ?: record.investedCapital) * 100.0).takeIf(Double::isFinite),
+            investedCapital = record.investedCapital,
+            totalAssets = record.totalAssets
         )
     }
 }
@@ -1003,7 +1013,7 @@ private fun ProfitTrendCard(allSeries: List<DailyProfitPoint>) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
-                Text("收益走势", fontWeight = FontWeight.Bold)
+                Text("每日收益走势", fontWeight = FontWeight.Bold)
                 Text("${series.size} 个真实快照", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             }
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
@@ -1022,10 +1032,10 @@ private fun ProfitTrendCard(allSeries: List<DailyProfitPoint>) {
                 series.isEmpty() -> Text("暂无真实收益快照。同步持仓或通过插件完成交易后开始记录。", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 else -> {
                     val latest = series.last()
-                    Text(formatPnl(latest.profit), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = pnlColor(latest.profit))
-                    Text("仅使用插件实际成交与持仓同步记录，不使用 K 线补造历史", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                    val minProfit = min(series.minOf(DailyProfitPoint::profit), 0.0)
-                    val maxProfit = max(series.maxOf(DailyProfitPoint::profit), 0.0)
+                    Text(formatPnl(latest.dailyProfit), style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.Bold, color = pnlColor(latest.dailyProfit))
+                    Text("当日收益率 ${formatPercent(latest.dailyProfitPct)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    val minProfit = min(series.minOf(DailyProfitPoint::dailyProfit), 0.0)
+                    val maxProfit = max(series.maxOf(DailyProfitPoint::dailyProfit), 0.0)
                     val range = (maxProfit - minProfit).takeIf { it > 0.0001 } ?: 1.0
                     val gridColor = MaterialTheme.colorScheme.outlineVariant
                     Canvas(Modifier.fillMaxWidth().height(180.dp)) {
@@ -1041,19 +1051,19 @@ private fun ProfitTrendCard(allSeries: List<DailyProfitPoint>) {
                         val zeroY = pointOffset(0, 0.0).y
                         drawLine(gridColor, Offset(left, zeroY), Offset(right, zeroY), strokeWidth = 1.dp.toPx())
                         if (series.size == 1) {
-                            drawCircle(pnlColor(series[0].profit), radius = 3.dp.toPx(), center = pointOffset(0, series[0].profit))
+                            drawCircle(pnlColor(series[0].dailyProfit), radius = 3.dp.toPx(), center = pointOffset(0, series[0].dailyProfit))
                         } else {
                             for (index in 1 until series.size) {
                                 val previous = series[index - 1]
                                 val current = series[index]
                                 drawLine(
-                                    color = if (current.profit >= previous.profit) STOCK_UP else STOCK_DOWN,
-                                    start = pointOffset(index - 1, previous.profit),
-                                    end = pointOffset(index, current.profit),
+                                    color = pnlColor(current.dailyProfit),
+                                    start = pointOffset(index - 1, previous.dailyProfit),
+                                    end = pointOffset(index, current.dailyProfit),
                                     strokeWidth = 2.dp.toPx()
                                 )
                             }
-                            drawCircle(pnlColor(latest.profit), radius = 3.dp.toPx(), center = pointOffset(series.lastIndex, latest.profit))
+                            drawCircle(pnlColor(latest.dailyProfit), radius = 3.dp.toPx(), center = pointOffset(series.lastIndex, latest.dailyProfit))
                         }
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
@@ -1157,7 +1167,7 @@ private fun ProfitCalendarMonth(
                 val point = valuesByDay[day]
                 val background = when {
                     point == null -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = .35f)
-                    point.profit >= 0.0 -> STOCK_UP.copy(alpha = .14f)
+                    point.dailyProfit >= 0.0 -> STOCK_UP.copy(alpha = .14f)
                     else -> STOCK_DOWN.copy(alpha = .14f)
                 }
                 Column(
@@ -1172,8 +1182,8 @@ private fun ProfitCalendarMonth(
                     if (day in 1..daysInMonth) {
                         Text(day.toString(), style = MaterialTheme.typography.labelSmall, fontWeight = if (point?.day == selectedDay) FontWeight.Bold else FontWeight.Normal)
                         if (point != null) {
-                            Text(formatCalendarProfit(point.profit), style = MaterialTheme.typography.labelSmall, color = pnlColor(point.profit), maxLines = 1)
-                            Text(point.profitPct?.let { "%+.1f%%".format(it) } ?: "--", style = MaterialTheme.typography.labelSmall, color = pnlColor(point.profit), maxLines = 1)
+                            Text(formatCalendarProfit(point.dailyProfit), style = MaterialTheme.typography.labelSmall, color = pnlColor(point.dailyProfit), maxLines = 1)
+                            Text(point.dailyProfitPct?.let { "%+.1f%%".format(it) } ?: "--", style = MaterialTheme.typography.labelSmall, color = pnlColor(point.dailyProfit), maxLines = 1)
                         }
                     }
                 }
@@ -1184,7 +1194,8 @@ private fun ProfitCalendarMonth(
     if (selected != null) {
         Column(Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp)).padding(10.dp)) {
             Text("${selected.day} 最后一次真实快照", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Text("累计盈亏 ${formatPnl(selected.profit)} · ${formatPercent(selected.profitPct)}", color = pnlColor(selected.profit), fontWeight = FontWeight.Bold)
+            Text("当日盈亏 ${formatPnl(selected.dailyProfit)} · ${formatPercent(selected.dailyProfitPct)}", color = pnlColor(selected.dailyProfit), fontWeight = FontWeight.Bold)
+            Text("累计盈亏 ${formatPnl(selected.cumulativeProfit)} · ${formatPercent(selected.cumulativeProfitPct)}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
             Text("累计投入 ${formatMoney(selected.investedCapital)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
     }
@@ -1197,16 +1208,12 @@ private fun ProfitMonthlyList(series: List<DailyProfitPoint>) {
         Text("暂无月度收益记录", color = MaterialTheme.colorScheme.onSurfaceVariant)
         return
     }
-    var previousMonthClose: DailyProfitPoint? = null
     val summaries = months.map { (month, records) ->
         val ordered = records.sortedBy(DailyProfitPoint::epochMillis)
-        val first = ordered.first()
         val last = ordered.last()
-        val baseline = previousMonthClose ?: first.takeIf { ordered.size >= 2 }
-        val change = baseline?.takeIf { it !== last }?.let { last.profit - it.profit }
-        val changePct = baseline?.profitPct?.let { baselinePct -> last.profitPct?.minus(baselinePct) }
-        previousMonthClose = last
-        MonthlyProfitSummary(month, baseline, last, change, changePct)
+        val change = ordered.sumOf(DailyProfitPoint::dailyProfit)
+        val changePct = (change / (last.totalAssets ?: last.investedCapital) * 100.0).takeIf(Double::isFinite)
+        MonthlyProfitSummary(month, ordered.first(), last, change, changePct)
     }.asReversed()
     summaries.forEach { summary ->
         Row(
@@ -1217,15 +1224,14 @@ private fun ProfitMonthlyList(series: List<DailyProfitPoint>) {
             Column(Modifier.weight(1f)) {
                 Text(summary.month.replace("-", "年") + "月", fontWeight = FontWeight.Bold)
                 Text(
-                    summary.baseline?.let { "记录区间 ${it.day.substring(5)}—${summary.close.day.substring(5)}" }
-                        ?: "缺少更早快照，无法计算月变化",
+                    "记录区间 ${summary.open.day.substring(5)}—${summary.close.day.substring(5)}",
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(formatPnl(summary.change), color = pnlColor(summary.change), fontWeight = FontWeight.Bold)
-                Text("收益率变化 ${formatPercent(summary.changePct)}", color = pnlColor(summary.changePct), style = MaterialTheme.typography.labelSmall)
+                Text("月收益率 ${formatPercent(summary.changePct)}", color = pnlColor(summary.changePct), style = MaterialTheme.typography.labelSmall)
             }
         }
     }
@@ -1233,9 +1239,9 @@ private fun ProfitMonthlyList(series: List<DailyProfitPoint>) {
 
 private data class MonthlyProfitSummary(
     val month: String,
-    val baseline: DailyProfitPoint?,
+    val open: DailyProfitPoint,
     val close: DailyProfitPoint,
-    val change: Double?,
+    val change: Double,
     val changePct: Double?
 )
 
@@ -1264,8 +1270,8 @@ private fun AnalysisPage(state: StockUiState, onClearHistory: () -> Unit) {
     Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface)) {
         Column(Modifier.fillMaxWidth().padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             Text("收益分析", fontWeight = FontWeight.Bold)
-            Text(formatPnl(latestRecordedProfit?.profit), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = pnlColor(latestRecordedProfit?.profit))
-            Text("累计收益率 ${formatPercent(latestRecordedProfit?.profitPct)} · ${profitSeries.size} 个真实快照", color = MaterialTheme.colorScheme.onSurfaceVariant)
+            Text(formatPnl(latestRecordedProfit?.cumulativeProfit), style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold, color = pnlColor(latestRecordedProfit?.cumulativeProfit))
+            Text("累计收益率 ${formatPercent(latestRecordedProfit?.cumulativeProfitPct)} · ${profitSeries.size} 个真实快照", color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text("成交盈亏按交易前服务器实时查价记录；持仓盈亏按服务器返回市值记录", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                 AnalysisStat("胜率", winRate?.let { "%.0f%%".format(it) } ?: "--", Modifier.weight(1f))

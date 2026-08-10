@@ -12,7 +12,8 @@ data class ProfitHistoryRecord(
     val timestamp: Long,
     val totalPnl: Double,
     val totalPnlPct: Double?,
-    val investedCapital: Double
+    val investedCapital: Double,
+    val totalAssets: Double? = null
 )
 
 private data class ProfitLedger(
@@ -43,6 +44,7 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
         playerUuid: String,
         unrealizedPnl: Double,
         currentTrackedCost: Double,
+        totalAssets: Double? = null,
         timestamp: Long = System.currentTimeMillis()
     ): List<ProfitHistoryRecord> {
         val ledger = loadLedger(playerUuid)
@@ -55,8 +57,9 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
             day = day,
             timestamp = timestamp,
             totalPnl = totalPnl,
-            totalPnlPct = (totalPnl / investedCapital * 100.0).takeIf(Double::isFinite),
-            investedCapital = investedCapital
+            totalPnlPct = (totalPnl / (totalAssets ?: investedCapital) * 100.0).takeIf(Double::isFinite),
+            investedCapital = investedCapital,
+            totalAssets = totalAssets
         )
         val updated = ledger.copy(
             cumulativeBuyCost = investedCapital,
@@ -94,7 +97,8 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
                         timestamp = timestamp,
                         totalPnl = totalPnl,
                         totalPnlPct = properties.getProperty("$day.totalPnlPct")?.toDoubleOrNull(),
-                        investedCapital = investedCapital
+                        investedCapital = investedCapital,
+                        totalAssets = properties.getProperty("$day.totalAssets")?.toDoubleOrNull()
                     )
                 }.associateBy(ProfitHistoryRecord::day)
             ProfitLedger(
@@ -116,6 +120,7 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
                 setProperty("${record.day}.totalPnl", record.totalPnl.toString())
                 record.totalPnlPct?.let { setProperty("${record.day}.totalPnlPct", it.toString()) }
                 setProperty("${record.day}.investedCapital", record.investedCapital.toString())
+                record.totalAssets?.let { setProperty("${record.day}.totalAssets", it.toString()) }
             }
         }
         val temporary = File(file.parentFile, "${file.name}.tmp")
