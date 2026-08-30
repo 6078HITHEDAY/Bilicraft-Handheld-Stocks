@@ -104,7 +104,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.2.2",
+        version = "0.2.3",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 

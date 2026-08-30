@@ -2,7 +2,7 @@
 
 Bilicraft Handheld Stocks（股市面板）是为 **Bilicraft Handheld** 制作的外部 Compose 插件。它把帕拉伦股市行情、K 线分析、玩家资金与持股查询以及股票交易整合在同一个移动端面板中。
 
-当前版本：`0.2.2`
+当前版本：`0.2.3`
 
 ## 功能
 
@@ -82,7 +82,7 @@ sdk.dir=/path/to/android-sdk
 生成文件位于：
 
 ```text
-build/outputs/bhplugin/stock-market-0.2.2.bhplugin
+build/outputs/bhplugin/stock-market-0.2.3.bhplugin
 ```
 
 `.bhplugin` 是 ZIP 格式的插件包，包含：
@@ -126,9 +126,9 @@ classes.dex
 
 ```bash
 gradle --no-daemon clean packageBhPlugin
-unzip -t build/outputs/bhplugin/stock-market-0.2.2.bhplugin
-unzip -p build/outputs/bhplugin/stock-market-0.2.2.bhplugin plugin.json
-sha256sum build/outputs/bhplugin/stock-market-0.2.2.bhplugin
+unzip -t build/outputs/bhplugin/stock-market-0.2.3.bhplugin
+unzip -p build/outputs/bhplugin/stock-market-0.2.3.bhplugin plugin.json
+sha256sum build/outputs/bhplugin/stock-market-0.2.3.bhplugin
 ```
 
 ## 许可

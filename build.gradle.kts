@@ -10,7 +10,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization") version "2.0.21"
 }
 
-version = "0.2.2"
+version = "0.2.3"
 
 group = "com.bilicraft.handheld.stockplugin"
 
@@ -47,6 +47,8 @@ dependencies {
     compileOnly("androidx.activity:activity-compose:1.9.2")
     compileOnly("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.1")
     compileOnly("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.1")
+
+    testImplementation("junit:junit:4.13.2")
 }
 
 fun androidSdkDir(): File {

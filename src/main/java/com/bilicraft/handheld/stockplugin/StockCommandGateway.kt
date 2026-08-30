@@ -172,7 +172,7 @@ class StockCommandGateway(
                 !line.matches(Regex("[+-]?\\d+(\\.\\d+)?%")) && !line.contains("帕拉伦股市")
         } ?: return null
         val id = ID_REGEX.find(text)?.groupValues?.getOrNull(1)?.toIntOrNull() ?: requestedId
-        val price = PRICE_REGEX.find(text)?.groupValues?.getOrNull(1)?.toDoubleOrNull() ?: return null
+        val price = parseMarketPrice(text) ?: return null
         val status = STATUS_REGEX.find(text)?.groupValues?.getOrNull(1)?.trim()
         val available = AVAILABLE_REGEX.find(text)?.groupValues?.getOrNull(1)?.toLongOrNull()
         return LiveStockInfo(id, name, price, status, available)
@@ -263,7 +263,7 @@ class StockCommandGateway(
     companion object {
         private val MONEY_REGEX = Regex("(?:资金|余额)[:：]?\\s*\\$?([0-9,]+(?:\\.[0-9]+)?)")
         private val ID_REGEX = Regex("Id[:：]\\s*(\\d+)", RegexOption.IGNORE_CASE)
-        private val PRICE_REGEX = Regex("价格[:：]\\s*([0-9]+(?:\\.[0-9]+)?)")
+        private val PRICE_REGEX = Regex("价格[:：]\\s*([0-9,]+(?:\\.[0-9]+)?)\\s*([KMBT]?)", RegexOption.IGNORE_CASE)
         private val STATUS_REGEX = Regex("状态[:：]\\s*([^\\n]+)")
         private val AVAILABLE_REGEX = Regex("可用股数[:：]\\s*(\\d+)")
         private val SHARES_REGEX = Regex("股票[:：]\\s*(\\d+)")
@@ -283,5 +283,18 @@ class StockCommandGateway(
             "当前没有股票",
             "没有任何股票"
         )
+
+        internal fun parseMarketPrice(text: String): Double? {
+            val match = PRICE_REGEX.find(text) ?: return null
+            val number = match.groupValues[1].replace(",", "").toDoubleOrNull() ?: return null
+            val multiplier = when (match.groupValues[2].uppercase()) {
+                "K" -> 1_000.0
+                "M" -> 1_000_000.0
+                "B" -> 1_000_000_000.0
+                "T" -> 1_000_000_000_000.0
+                else -> 1.0
+            }
+            return (number * multiplier).takeIf { it.isFinite() }
+        }
     }
 }
