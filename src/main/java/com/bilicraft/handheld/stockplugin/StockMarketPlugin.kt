@@ -86,6 +86,7 @@ import com.bilicraft.handheld.pluginapi.BhPluginEntrypoint
 import com.bilicraft.handheld.pluginapi.BhPluginHost
 import com.bilicraft.handheld.pluginapi.BhPluginPanel
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Calendar
@@ -104,7 +105,7 @@ object StockMarketPlugin : BhPlugin {
         id = "stock-market-dashboard",
         name = "股市面板",
         description = "抓取网页股市数据，展示 K 线并生成 Minecraft 股票交易命令。",
-        version = "0.2.3",
+        version = "0.2.4",
         minApiVersion = BH_PLUGIN_API_VERSION
     )
 
@@ -168,6 +169,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
     var playerStateInitialized by remember { mutableStateOf(false) }
     var confirmClearRecords by remember { mutableStateOf(false) }
     var confirmClearProfitHistory by remember { mutableStateOf(false) }
+    var editProfitRecord by remember { mutableStateOf<ProfitHistoryRecord?>(null) }
+    var editProfitValue by remember { mutableStateOf("") }
 
     fun toggleWatchlist(companyId: Int) {
         watchlistIds = if (companyId in watchlistIds) watchlistIds - companyId else watchlistIds + companyId
@@ -179,6 +182,25 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
         chartDisplaySettings = settings
         runCatching { saveChartDisplaySettings(host.pluginDataDir, settings) }
             .onFailure { host.log("保存 K 线显示设置失败：${it.message}") }
+    }
+
+    fun openProfitEditor(record: ProfitHistoryRecord) {
+        val previous = state.profitHistory.sortedBy(ProfitHistoryRecord::timestamp)
+            .takeWhile { it.day != record.day }.lastOrNull()?.totalPnl ?: 0.0
+        editProfitRecord = record
+        editProfitValue = (record.totalPnl - previous).toString()
+    }
+
+    fun saveProfitEdit() {
+        val record = editProfitRecord ?: return
+        val value = editProfitValue.toDoubleOrNull()
+        val playerUuid = currentPlayer?.uuid
+        if (value == null || !value.isFinite() || playerUuid == null) {
+            state = state.copy(dialogMessage = "请输入有效的当日盈亏数字。")
+            return
+        }
+        state = state.copy(profitHistory = profitStore.updateDailyPnl(playerUuid, record.day, value))
+        editProfitRecord = null
     }
 
     fun selectedCompany(): StockCompany? = state.companies.firstOrNull { it.id == state.selectedCompanyId }
@@ -543,7 +565,8 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     )
                     StockMainTab.Analysis -> AnalysisPage(
                         state = state,
-                        onClearHistory = { confirmClearProfitHistory = true }
+                        onClearHistory = { confirmClearProfitHistory = true },
+                        onEditProfit = ::openProfitEditor
                     )
                 }
             }
@@ -598,6 +621,23 @@ private fun StockMarketPanel(host: BhPluginHost, onClose: () -> Unit) {
                     confirmClearProfitHistory = false
                 }) { Text("清除") }
             }
+        )
+    }
+
+    editProfitRecord?.let { record ->
+        AlertDialog(
+            onDismissRequest = { editProfitRecord = null },
+            title = { Text("编辑 ${record.day} 当日盈亏") },
+            text = {
+                OutlinedTextField(
+                    value = editProfitValue,
+                    onValueChange = { editProfitValue = it },
+                    label = { Text("当日盈亏（元）") },
+                    singleLine = true
+                )
+            },
+            dismissButton = { TextButton(onClick = { editProfitRecord = null }) { Text("取消") } },
+            confirmButton = { TextButton(onClick = ::saveProfitEdit) { Text("保存") } }
         )
     }
 }
@@ -991,6 +1031,7 @@ private fun buildDailyProfitSeries(state: StockUiState): List<DailyProfitPoint> 
             totalAssets = record.totalAssets
         )
     }
+
 }
 
 private enum class ProfitRange(val label: String, val days: Int?) {
@@ -1083,7 +1124,10 @@ private enum class ProfitCalendarMode(val label: String) {
 }
 
 @Composable
-private fun ProfitCalendarCard(series: List<DailyProfitPoint>) {
+private fun ProfitCalendarCard(
+    series: List<DailyProfitPoint>,
+    onLongPressDay: (DailyProfitPoint) -> Unit
+) {
     var mode by remember { mutableStateOf(ProfitCalendarMode.Calendar) }
     var monthOffset by remember { mutableStateOf(0) }
     var selectedDay by remember { mutableStateOf<String?>(null) }
@@ -1118,6 +1162,7 @@ private fun ProfitCalendarCard(series: List<DailyProfitPoint>) {
                     calendar = calendar,
                     selectedDay = selectedDay,
                     onSelectDay = { selectedDay = it },
+                    onLongPressDay = onLongPressDay,
                     onPreviousMonth = { monthOffset -= 1; selectedDay = null },
                     onNextMonth = { monthOffset += 1; selectedDay = null },
                     canGoNext = monthOffset < 0
@@ -1135,6 +1180,7 @@ private fun ProfitCalendarMonth(
     calendar: Calendar,
     selectedDay: String?,
     onSelectDay: (String) -> Unit,
+    onLongPressDay: (DailyProfitPoint) -> Unit,
     onPreviousMonth: () -> Unit,
     onNextMonth: () -> Unit,
     canGoNext: Boolean
@@ -1175,6 +1221,7 @@ private fun ProfitCalendarMonth(
                         .weight(1f)
                         .height(64.dp)
                         .background(if (day in 1..daysInMonth) background else Color.Transparent, RoundedCornerShape(6.dp))
+                        .profitCalendarLongPress(point, onLongPressDay)
                         .clickable(enabled = point != null) { point?.let { onSelectDay(it.day) } }
                         .padding(vertical = 3.dp),
                     horizontalAlignment = Alignment.CenterHorizontally
@@ -1198,6 +1245,29 @@ private fun ProfitCalendarMonth(
             Text("累计盈亏 ${formatPnl(selected.cumulativeProfit)} · ${formatPercent(selected.cumulativeProfitPct)}", color = MaterialTheme.colorScheme.onSurfaceVariant, style = MaterialTheme.typography.labelSmall)
             Text("累计投入 ${formatMoney(selected.investedCapital)}", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
         }
+    }
+}
+
+private fun Modifier.profitCalendarLongPress(
+    point: DailyProfitPoint?,
+    onLongPress: (DailyProfitPoint) -> Unit
+): Modifier = if (point == null) this else pointerInput(point.day) {
+    val holdDurationMillis = 10_000L
+    // A small raw-pixel threshold keeps the hidden hold gesture from
+    // interfering with normal scrolling; any noticeable drag cancels it.
+    val movementThreshold = 24f
+    awaitEachGesture {
+        val down = awaitFirstDown(requireUnconsumed = false)
+        val start = down.position
+        val completed = withTimeoutOrNull(holdDurationMillis) {
+            while (true) {
+                val change = awaitPointerEvent().changes.firstOrNull() ?: return@withTimeoutOrNull false
+                if (!change.pressed) return@withTimeoutOrNull false
+                if ((change.position - start).getDistance() > movementThreshold) return@withTimeoutOrNull false
+            }
+            true
+        } ?: true
+        if (completed) onLongPress(point)
     }
 }
 
@@ -1252,7 +1322,11 @@ private fun formatCalendarProfit(value: Double): String = when {
 }
 
 @Composable
-private fun AnalysisPage(state: StockUiState, onClearHistory: () -> Unit) {
+private fun AnalysisPage(
+    state: StockUiState,
+    onClearHistory: () -> Unit,
+    onEditProfit: (ProfitHistoryRecord) -> Unit
+) {
     val metrics = portfolioMetrics(state)
     val profitSeries = remember(state.profitHistory) {
         buildDailyProfitSeries(state)
@@ -1282,7 +1356,9 @@ private fun AnalysisPage(state: StockUiState, onClearHistory: () -> Unit) {
     }
 
     ProfitTrendCard(profitSeries)
-    ProfitCalendarCard(profitSeries)
+    ProfitCalendarCard(profitSeries) { point ->
+        state.profitHistory.firstOrNull { it.day == point.day }?.let(onEditProfit)
+    }
     OutlinedButton(onClick = onClearHistory, modifier = Modifier.fillMaxWidth()) {
         Text("清理本地收益记录缓存")
     }

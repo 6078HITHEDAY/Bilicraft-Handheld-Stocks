@@ -19,6 +19,7 @@ data class ProfitHistoryRecord(
 private data class ProfitLedger(
     val realizedPnl: Double = 0.0,
     val cumulativeBuyCost: Double = 0.0,
+    val manualPnlAdjustment: Double = 0.0,
     val records: Map<String, ProfitHistoryRecord> = emptyMap()
 )
 
@@ -51,7 +52,7 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
         val investedCapital = ledger.cumulativeBuyCost.takeIf { it > 0.0 }
             ?: currentTrackedCost.takeIf { it > 0.0 }
             ?: return ledger.records.values.sortedBy { it.timestamp }
-        val totalPnl = ledger.realizedPnl + unrealizedPnl
+        val totalPnl = ledger.realizedPnl + unrealizedPnl + ledger.manualPnlAdjustment
         val day = SimpleDateFormat("yyyy-MM-dd", Locale.getDefault()).format(Date(timestamp))
         val record = ProfitHistoryRecord(
             day = day,
@@ -67,6 +68,39 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
         )
         saveLedger(playerUuid, updated)
         return updated.records.values.sortedBy { it.timestamp }
+    }
+
+    /**
+     * Adjusts one day's displayed P&L and carries the resulting cumulative
+     * adjustment forward to all later snapshots and future snapshots.
+     */
+    @Synchronized
+    fun updateDailyPnl(playerUuid: String, day: String, dailyPnl: Double): List<ProfitHistoryRecord> {
+        if (!dailyPnl.isFinite()) return load(playerUuid)
+        val ledger = loadLedger(playerUuid)
+        val ordered = ledger.records.values.sortedBy { it.timestamp }
+        val index = ordered.indexOfFirst { it.day == day }
+        if (index < 0) return ordered
+        val previous = ordered.getOrNull(index - 1)?.totalPnl ?: 0.0
+        val currentDailyPnl = ordered[index].totalPnl - previous
+        val delta = dailyPnl - currentDailyPnl
+        if (!delta.isFinite() || delta == 0.0) return ordered
+        val updatedRecords = ordered.mapIndexed { recordIndex, record ->
+            if (recordIndex < index) record else {
+                val totalPnl = record.totalPnl + delta
+                record.copy(
+                    totalPnl = totalPnl,
+                    totalPnlPct = (totalPnl / (record.totalAssets ?: record.investedCapital) * 100.0)
+                        .takeIf(Double::isFinite)
+                )
+            }
+        }.associateBy(ProfitHistoryRecord::day)
+        val updated = ledger.copy(
+            manualPnlAdjustment = ledger.manualPnlAdjustment + delta,
+            records = updatedRecords
+        )
+        saveLedger(playerUuid, updated)
+        return updatedRecords.values.sortedBy { it.timestamp }
     }
 
     @Synchronized
@@ -104,6 +138,7 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
             ProfitLedger(
                 realizedPnl = properties.getProperty("meta.realizedPnl")?.toDoubleOrNull() ?: 0.0,
                 cumulativeBuyCost = properties.getProperty("meta.cumulativeBuyCost")?.toDoubleOrNull() ?: 0.0,
+                manualPnlAdjustment = properties.getProperty("meta.manualPnlAdjustment")?.toDoubleOrNull() ?: 0.0,
                 records = records
             )
         }.getOrDefault(ProfitLedger())
@@ -115,6 +150,7 @@ class ProfitHistoryStore(private val host: BhPluginHost) {
         val properties = Properties().apply {
             setProperty("meta.realizedPnl", ledger.realizedPnl.toString())
             setProperty("meta.cumulativeBuyCost", ledger.cumulativeBuyCost.toString())
+            setProperty("meta.manualPnlAdjustment", ledger.manualPnlAdjustment.toString())
             ledger.records.values.forEach { record ->
                 setProperty("${record.day}.timestamp", record.timestamp.toString())
                 setProperty("${record.day}.totalPnl", record.totalPnl.toString())
